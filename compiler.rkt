@@ -1,6 +1,7 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
+(require graph)
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
 (provide (all-defined-out))
@@ -50,12 +51,6 @@
 ;; HW1 Passes
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define uniquify-symbol-count 0)
-(define next-uniquify-symbol
-  (lambda ()
-    (set! uniquify-symbol-count (+ uniquify-symbol-count 1))
-    (string->symbol (string-append "x." (number->string uniquify-symbol-count)))))
-
 (define (uniquify-exp env)
   (lambda (e)
     (match e
@@ -66,7 +61,7 @@
       [(Int n) (Int n)]
       [(Let x e body)
        (define e1 ((uniquify-exp env) e))
-       (define x1 (next-uniquify-symbol))
+       (define x1 (gensym x))
        (define body1 ((uniquify-exp (dict-set env x x1)) body))
        (Let x1 e1 body1)]
       [(Prim op es)
@@ -76,12 +71,6 @@
 (define (uniquify p)
   (match p
     [(Program info e) (Program info ((uniquify-exp '()) e))]))
-
-(define rco-symbol-count 0)
-(define next-rco-symbol
-  (lambda ()
-    (set! rco-symbol-count (+ rco-symbol-count 1))
-    (string->symbol (string-append "tmp." (number->string rco-symbol-count)))))
 
 (define (map-to-lets maps e)
   (if (null? maps)
@@ -109,11 +98,11 @@
     [(Var v) (values (Var v) '())]
     [(Int i) (values (Int i) '())]
     [(Prim op es)
-     (define s (next-rco-symbol))
+     (define s (gensym 'tmp))
      (values (Var s)
        (list (cons s (Prim op (map rco-exp es)))))]
     [(Let x e body)
-     (define s (next-rco-symbol))
+     (define s (gensym 'tmp))
      (values (Var s)
        (list (cons s (Let x (rco-exp e) (rco-exp body)))))]))
 
@@ -164,7 +153,7 @@
   (match p
     [(Program info e)
      (define-values (tail vars) (explicate-tail e))
-     (CProgram (append info vars) `((start . ,tail)))]))
+     (CProgram (dict-set info 'locals vars) `((start . ,tail)))]))
 
 (define (atm e)
   (match e
@@ -289,9 +278,10 @@
 (define (assign-homes p)
   (match p
     [(X86Program info `((start . ,(Block bi instrs))))
-     (X86Program
-       `(,(align-stack-size (* (length info) 8)))
-       `((start . ,(Block bi (assign-homes-instrs instrs (allocate-homes info -8))))))]))
+     (let ([vars (dict-ref info 'locals)])
+       (X86Program
+         (dict-set info 'stack-space (align-stack-size (* (length vars) 8)))
+         `((start . ,(Block bi (assign-homes-instrs instrs (allocate-homes vars -8)))))))]))
 
 (define (patch-x86_0-bin-instr op arg1 arg2)
   (match arg1
@@ -368,17 +358,60 @@
          "")
        "\n")]))
 
-;; (printf
-;;   (print-x86
-;;     (patch-instructions
-;;       (assign-homes
-;;         (select-instructions
-;;           (explicate-control
-;;             (remove-complex-opera*
-;;               (uniquify
-;;                 (parse-program
-;;                   '(program ()
-;;                      (let ([x (read)])
-;;                        (let ([y (read)])
-;;                          (let ([z (read)])
-;;                            (+ (+ x y) (- z)))))))))))))))
+(define (arg-vars args)
+  (if (null? args)
+      '()
+      (match (car args)
+        [(Var v) (cons v (arg-vars (cdr args)))]
+        [else (arg-vars (cdr args))])))
+
+(define (instr-variables instr)
+  (match instr
+    [(Instr op args) (arg-vars args)]
+    [else '()]))
+
+(define (instr-r-variables instr)
+  (match instr
+    [(Instr op args)
+     (arg-vars (if (eq? op 'movq) `(,(car args)) args))]
+    [else '()]))
+
+(define (instr-w-variables instr)
+  (match instr
+    [(Instr 'negq args) (arg-vars args)]
+    [(Instr op `(,arg1 ,arg2)) (arg-vars (list arg2))]
+    [else '()]))
+
+(define (uncover-live-helper instrs live-afters)
+  (if (null? instrs)
+      live-afters
+      (let ([instr (car instrs)]
+            [lafters (uncover-live-helper (cdr instrs) live-afters)])
+        (define r (instr-r-variables instr))
+        (define w (instr-w-variables instr))
+        (define lafter (car lafters))
+        (define lbefore (set-union (set-subtract lafter w) r))
+        (cons lbefore lafters))))
+
+;; uncover-live : pseudo-x86 -> pseudo-x86
+(define (uncover-live p)
+  (match p
+    [(X86Program info `((start . ,(Block bi instrs))))
+     (X86Program
+       (dict-set info 'live-after-set (uncover-live-helper instrs '(())))
+       `((start . ,(Block bi instrs))))]))
+
+;; (define p0 (parse-program
+;;              '(program ()
+;;                 (let ([x (read)])
+;;                   (let ([y (read)])
+;;                     (let ([z (read)])
+;;                       (+ (+ x y) (- z))))))))
+;; (define p1 (uniquify p0))
+;; (define p2 (remove-complex-opera* p1))
+;; (define p3 (explicate-control p2))
+;; (define p4 (select-instructions p3))
+;; (define p5 (uncover-live p4))
+;; (define p6 (assign-homes p5))
+;; (define p7 (patch-instructions p6))
+;; (printf (print-x86 p7))
