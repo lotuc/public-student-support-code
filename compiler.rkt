@@ -401,6 +401,25 @@
        (dict-set info 'live-after-set (uncover-live-helper instrs '(())))
        `((start . ,(Block bi instrs))))]))
 
+(define (build-interference-helper instrs live-set g)
+  (when (not (null? instrs))
+    (let ([vars (instr-w-variables (car instrs))])
+      (for/list ([var vars])
+        (for/list ([live-var (car live-set)])
+          (add-vertex! g live-var)
+          (when (not (eq? var live-var)) (add-edge! g var live-var)))))
+    (build-interference-helper (cdr instrs) (cdr live-set) g)))
+
+;; build-interference :: pseudo-x86 -> pseudo-x86
+(define (build-interference p)
+  (match p
+    [(X86Program info `((start . ,(Block bi instrs))))
+     (define g (unweighted-graph/undirected '()))
+     (build-interference-helper instrs (dict-ref info 'live-after-set) g)
+     (X86Program
+       (dict-set info 'conflicts g)
+       `((start . ,(Block bi instrs))))]))
+
 ;; (define p0 (parse-program
 ;;              '(program ()
 ;;                 (let ([x (read)])
@@ -412,6 +431,7 @@
 ;; (define p3 (explicate-control p2))
 ;; (define p4 (select-instructions p3))
 ;; (define p5 (uncover-live p4))
-;; (define p6 (assign-homes p5))
-;; (define p7 (patch-instructions p6))
+;; (define p6 (build-interference p5))
+;; (define p7 (assign-homes p6))
+;; (define p8 (patch-instructions p7))
 ;; (printf (print-x86 p7))
